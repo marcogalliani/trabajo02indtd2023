@@ -1,0 +1,332 @@
+---
+title: "Trabajo 2: Decision Multicriterio"
+author: Marco Galliani
+output: 
+    html_document:
+        toc: TRUE
+
+---
+```{r include=FALSE, warning=FALSE}
+rm(list = ls())
+set.seed(050700)
+
+source("include/teoriadecision_funciones_multicriterio_utiles.R")
+source("include/teoriadecision_funciones_multicriterio.R")
+source("include/teoriadecision_funciones_multicriterio_diagram.R")
+```
+
+## Requirements
+Objetivos-Tareas del Trabajo sobre Decisión Multicriterio:
+
+* Crear un proyecto RStudio con un documento R Markdown en el que se resuelva el problema del tema elegido con 
+todas las técnicas vistas en clase de decisión multicriterio (AHP al menos con el paquete ahp, Electre, Promethee y ...).
+Además de la presentación y conclusiones obtenidas con los distintos métodos, también se valorará que aparezca
+la documentación utilizada así como material gráfico que mejore la comprensión del problema de decisión resuelto.
+* La salida generada puede ser: pdf o html.
+
+Evaluación:
+
+* La fecha de entrega del trabajo es el viernes 1 de diciembre de 2023 a las 23:59.
+* La nota del trabajo será un 10 % de la calificación en la evaluación continua de la parte de “problemas”.
+
+## Enunciado
+El problema propuesto se basa en la aplicacion de los metodos de decision a la evaluacion del mejor algoritmo de clasificacion aplicado al problema de detectar fraudes con tarjetas de credito. 
+
+En este constesto las alternativas son los diferentes algoritmos de clasificacion y los criterios son las diferentes medidas de bondad de clasificacion. 
+
+*Alternativas:*
+
+* Support Vector Machine (SVM)
+* k Nearest Neighbor
+* Random Forest
+* Multilayer Perceptron (MLP)
+
+*Medidas de bondad de adjuste:*
+
+* sensitivity (Recall) 
+* specificity
+* precision
+* f1 score 
+* accuracy 
+* AUC
+* MAE
+
+El conjunto de datos sobre que se entrenan los algoritmo es formado de una variable que indica se una fraude ha pasado o no y otras variables resultante de una ACP de las variables originales. La interpretacion de estas variables no es presente en el dataset.
+
+## Resolucion
+
+### 1-Exploration and preprocessing
+La procedura presentada en este apartado es la misma de [(1)](https://www.kaggle.com/search)
+
+```{r message=FALSE, warning=FALSE, include=FALSE}
+library(dplyr)
+library(Hmisc)
+library(skimr)
+library(caret)
+library(ROSE)
+```
+
+Cargando los datos
+```{r}
+df<- read.csv("data/creditcard.csv")
+```
+
+Se consideran solo variables numericas
+```{r}
+# For while I have decided to use only the numerical variables which are the result of a PCA transformation.
+df$Time<-NULL
+df$Amount<-NULL
+```
+
+Separacion del conjunto de datos
+```{r}
+# train-test split, createDataPartition  create balanced splits of the data, random sampling occurs within each class
+# tt will be a matrix of row position to the training data
+
+set.seed(1512)
+tt<-createDataPartition(  
+  y=df$Class,
+  times = 1,
+  p = 0.75,
+  list = FALSE
+)
+
+dftrain<-df[tt,]
+dftest<-df[-tt,]
+```
+
+No en balance
+```{r}
+table(dftrain$Class)
+```
+
+Oversampling
+```{r}
+# here, I will apply oversampling and undersampling at the same time
+# the minority class is oversampled with replacement and majority class is undersampled without replacement
+
+dftrain_s<-ovun.sample(Class~., data=dftrain, seed=1512, method = "both", p=0.5, N= 10000)$data
+
+table(dftrain_s$Class)
+```
+
+### 2-Modelling
+Entrenamiento de los modelos considerados y evaluacion de las medidas de bondad de adjuste consideradas en el conjunto de datos de test
+
+```{r}
+dftrain_s$Class<-as.factor(dftrain_s$Class)
+```
+
+```{r}
+training_classifiers <- function(classifier_name){
+    # training the model
+    model <- train(form = Class~.,
+                   data = dftrain_s,
+                   trControl = trainControl(method="cv", number=5),
+                   method = classifier_name)
+    
+    # prediction on the test set
+    pred <- predict(model, dftest)
+    
+    # computation of the confusion matrix
+    cm <- confusionMatrix(pred, as.factor(dftest$Class), positive="1")
+    
+
+    # computing performance metrics
+    c( sensitivity = cm[["byClass"]][["Sensitivity"]], # (sensitivity is the same as recall)
+       specificity = cm[["byClass"]][["Specificity"]],
+       precision = cm[["byClass"]][["Precision"]],
+       f1 = cm[["byClass"]][["Precision"]],
+       accuracy = cm[["overall"]][["Accuracy"]],
+       AUC = ModelMetrics::auc(pred, as.factor(dftest$Class)),
+       MAE = ModelMetrics::mae(pred, as.factor(dftest$Class))
+    )
+}
+```
+
+
+```{r}
+
+decision_table <- list()
+
+decision_table[["svmRadial"]] <- training_classifiers("svmRadial")
+decision_table[["knn"]] <- training_classifiers("knn")
+decision_table[["rf"]] <- training_classifiers("rf")
+decision_table[["mlp"]] <- training_classifiers("mlp")
+
+
+decision_table <- as.data.frame(decision_table)
+```
+
+
+### 3-Analisis de Decision Multicriterio
+```{r}
+criteria <- list()
+
+criteria$names <- rownames(decision_table)
+alternatives <- colnames(decision_table)
+
+knitr::kable(decision_table, digits = 2)
+
+# minimizar MAE
+decision_table_mod <- decision_table
+decision_table_mod["MAE", ] <- -decision_table["MAE", ]
+```
+
+
+#### (1) Extracting the weights
+Para construir la tabla de comparacion de importancia relativa entre los criterios usamos la siguiente escala 
+
+* 1: Igual importancia para dos criterios
+* 3: Debil importancia de uno sobre otro
+* 5: Importancia esencial o fuerte de uno sobre otro
+* 7: Importancia demonstrada de un criterio sobre otro
+* 9: Importancia absoluta de uno sobre otro
+* 2,4,6,8: valores intermedios
+
+Medidas de bondad de adjuste ([enlace](https://en.wikipedia.org/wiki/Precision_and_recall))
+
+* sensitivity (Recall) 
+* specificity
+* precision
+* f1 score 
+* accuracy 
+* AUC
+* MAE
+
+*Motivaciones:*
+En esta aplicacion tiene sentido asumir que la medida recall sea mas importante de la medida de precision. De hecho quiseriamos que la frauda sean detectada en el numero mayor posible y no nos interesa si tenemos algunas falsa detectiones de fraudas.
+
+La medida de accuracy no es buena en el caso de datos no distribuidos equamente.
+
+```{r}
+table_criteria <-  multicriterio.crea.matrizvaloraciones_mej(
+    c(9, 9, 4, 6, 1/4, 7,
+      1/4, 1/5, 1/2, 1/9, 1/4,
+      1/4, 2, 1/9, 2,
+      6, 1/7, 4,
+      1/9, 1/3,
+      9),
+    numalternativas = length(criteria$names),
+    v.nombres.alternativas = criteria$names
+    )
+table_criteria
+
+extraction_AHP <- multicriterio.metodoAHP.variante1.autovectormayorautovalor(table_criteria)
+
+extraction_AHP$consistencia
+extraction_AHP$RI.coef.inconsistencia
+
+criteria$weights <- extraction_AHP$valoraciones.ahp
+criteria$weights
+```
+
+#### (2) Applying decision methods
+
+##### -> Promethee
+```{r}
+tab.fpref = matrix(c( 
+    # func, qi, pi, si 
+    1, 0,0,0,
+    1, 0,0,0,
+    1, 0,0,0,
+    1, 0,0,0,
+    1, 0,0,0,
+    1, 0,0,0,
+    1, 0,0,0
+    ), 
+    nrow = 7,
+    ncol = 4,
+    byrow = T
+)
+
+promethee_I <- multicriterio.metodo.promethee_i(t(as.matrix(decision_table_mod)), 
+                                 pesos.criterios = criteria$weights,
+                                 tab.fpref = tab.fpref
+                                 )
+
+promethee_II <- multicriterio.metodo.promethee_ii(t(as.matrix(decision_table_mod)), 
+                                 pesos.criterios = criteria$weights,
+                                 tab.fpref = tab.fpref
+                                 )
+
+qgraph::qgraph(promethee_I$tablarelacionsupera)
+qgraph::qgraph(promethee_II$tablarelacionsupera)
+```
+
+##### -> AHP
+Para respectar el axioma de homogeneidad usamos uno de los metodos de homogeneizacion antes de aplicar AHP
+```{r}
+metodo_AHP <- multicriterio.metodoAHP.pesosglobales_entabla(
+    criteria$weights,
+    t(multicriterio.homogeneizacion.promethee(t(as.matrix(decision_table_mod)),
+                                              v.delta.min = c(0,0,0,0,0,0,-1),
+                                              v.delta.max = c(1,1,1,1,1,1,0)))
+)
+```
+
+Ordenamiento:
+```{r}
+sort(metodo_AHP[,"Ponderadores Globales"], decreasing = T)
+```
+
+
+##### -> Electre
+Primera iteracion
+```{r}
+ELECTRE <- multicriterio.metodoELECTRE_I(
+    t(as.matrix(decision_table_mod)),
+    pesos.criterios = criteria$weights,
+    nivel.concordancia.minimo.alpha = 0.8,
+    no.se.compensan = c(Inf, Inf, Inf, Inf, Inf, Inf, Inf),
+    que.alternativas = T)
+
+ELECTRE$nucleo_aprox
+qgraph::qgraph(ELECTRE$relacion.dominante)
+```
+Segunda iteracion
+```{r}
+ELECTRE <- multicriterio.metodoELECTRE_I(
+    t(as.matrix(decision_table_mod)),
+    pesos.criterios = criteria$weights,
+    nivel.concordancia.minimo.alpha = 0.7,
+    no.se.compensan = c(Inf, Inf, Inf, Inf, Inf, Inf, Inf),
+    que.alternativas = c( T, F, T, T))
+
+ELECTRE$nucleo_aprox
+qgraph::qgraph(ELECTRE$relacion.dominante)
+```
+
+##### -> Topsis
+```{r include=FALSE}
+library(topsis)
+library(purrr)
+```
+
+```{r}
+criteria$objective_sym <- c("+", "+", "+", "+", "+", "+", "-") 
+
+topsis <- topsis(t(decision_table),
+       criteria$weights,
+       criteria$objective_sym)
+
+topsis_ranking <- map_chr(1:length(alternatives), function(index){
+    alternatives[which(topsis$rank == index)]
+})
+
+```
+
+Ordenamiento
+```{r}
+topsis_ranking
+```
+
+## Conclusion
+El ordenamento obtenido siempre es lo mismo. El mejor metodo en este caso es el metodo "Random Forest"
+
+
+
+## References
+
+(1) kaggle notebook: "MCDM for algorithm selection" por el usuario Golden, se puede encontrar [aqui](https://www.kaggle.com/search)
+(2) Kou G, Lu Y, Peng Y, Shi Y. Evaluation of classification algorithms using MCDM and rank correlation. Int J Info Tech Dec Mak. 2012;11:197–225. [aqui](https://www.worldscientific.com/doi/pdf/10.1142/S0219622012500095)
